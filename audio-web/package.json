@@ -1,0 +1,20 @@
+{
+  "name": "audio-modifier-web",
+  "version": "1.0.0",
+  "description": "A web application for modifying audio by adjusting pitch and speed.",
+  "main": "src/js/main.js",
+  "scripts": {
+    "start": "live-server .",
+    "build": "webpack --mode production"
+  },
+  "dependencies": {
+    "tone": "^14.8.30"
+  },
+  "devDependencies": {
+    "webpack": "^5.64.4",
+    "webpack-cli": "^4.9.1",
+    "live-server": "^1.2.1"
+  },
+  "author": "Your Name",
+  "license": "MIT"
+}
