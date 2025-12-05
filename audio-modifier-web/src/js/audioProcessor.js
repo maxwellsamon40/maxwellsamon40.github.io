@@ -1,107 +1,120 @@
-function adjustPitch(audioBuffer, pitchFactor) {
-    const offlineContext = new OfflineAudioContext(audioBuffer.numberOfChannels, audioBuffer.length, audioBuffer.sampleRate);
-    const source = offlineContext.createBufferSource();
-    source.buffer = audioBuffer;
+const audioProcessor = (function () {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    const audioCtx = new AudioCtx();
+    let originalBuffer = null;
+    let sourceNode = null;
+    let gainNode = audioCtx.createGain();
 
-    const pitchShift = offlineContext.createGain();
-    pitchShift.gain.value = pitchFactor;
+    async function loadArrayBuffer(arrayBuffer) {
+        originalBuffer = await audioCtx.decodeAudioData(arrayBuffer.slice(0));
+        return originalBuffer;
+    }
 
-    source.connect(pitchShift);
-    pitchShift.connect(offlineContext.destination);
-    source.start(0);
-    
-    return offlineContext.startRendering();
-}
+    function isLoaded() {
+        return !!originalBuffer;
+    }
 
-function adjustSpeed(audioBuffer, speedFactor) {
-    const offlineContext = new OfflineAudioContext(audioBuffer.numberOfChannels, audioBuffer.length, audioBuffer.sampleRate);
-    const source = offlineContext.createBufferSource();
-    source.buffer = audioBuffer;
-
-    source.playbackRate.value = speedFactor;
-    source.connect(offlineContext.destination);
-    source.start(0);
-    
-    return offlineContext.startRendering();
-}
-
-function handleAudioProcessing(audioFile, pitchFactor, speedFactor) {
-    return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = async (event) => {
-            const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-            const audioBuffer = await audioContext.decodeAudioData(event.target.result);
-            
-            const pitchAdjustedBuffer = await adjustPitch(audioBuffer, pitchFactor);
-            const speedAdjustedBuffer = await adjustSpeed(pitchAdjustedBuffer, speedFactor);
-            
-            resolve(speedAdjustedBuffer);
-        };
-        reader.onerror = (error) => reject(error);
-        reader.readAsArrayBuffer(audioFile);
-    });
-}
-
-function downloadAudio(buffer, filename) {
-    const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-    audioContext.decodeAudioData(buffer, (decodedData) => {
-        audioContext.destination;
-        const wavData = audioBufferToWav(decodedData);
-        const blob = new Blob([new Uint8Array(wavData)], { type: 'audio/wav' });
-        const url = URL.createObjectURL(blob);
-        
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-    });
-}
-
-function audioBufferToWav(buffer) {
-    const numChannels = buffer.numberOfChannels;
-    const sampleRate = buffer.sampleRate;
-    const format = 1; // PCM
-    const bitDepth = 16;
-
-    const bytesPerSample = bitDepth / 8;
-    const blockAlign = numChannels * bytesPerSample;
-    const byteLength = buffer.length * blockAlign + 44; // 44 bytes for WAV header
-    const wavBuffer = new ArrayBuffer(byteLength);
-    const view = new DataView(wavBuffer);
-
-    // Write WAV header
-    writeString(view, 0, 'RIFF');
-    view.setUint32(4, byteLength - 8, true);
-    writeString(view, 8, 'WAVE');
-    writeString(view, 12, 'fmt ');
-    view.setUint32(16, 16, true); // Subchunk1Size for PCM
-    view.setUint16(20, format, true);
-    view.setUint16(22, numChannels, true);
-    view.setUint32(24, sampleRate, true);
-    view.setUint32(28, sampleRate * blockAlign, true);
-    view.setUint16(32, blockAlign, true);
-    view.setUint16(34, bitDepth, true);
-    writeString(view, 36, 'data');
-    view.setUint32(40, byteLength - 44, true);
-
-    // Write PCM samples
-    let offset = 44;
-    for (let channel = 0; channel < numChannels; channel++) {
-        const channelData = buffer.getChannelData(channel);
-        for (let i = 0; i < channelData.length; i++) {
-            view.setInt16(offset, channelData[i] * 32767, true);
-            offset += bytesPerSample;
+    function stop() {
+        if (sourceNode) {
+            try { sourceNode.stop(0); } catch (e) {}
+            sourceNode.disconnect();
+            sourceNode = null;
         }
     }
 
-    return new Uint8Array(wavBuffer);
-}
-
-function writeString(view, offset, string) {
-    for (let i = 0; i < string.length; i++) {
-        view.setUint8(offset + i, string.charCodeAt(i));
+    function play(pitchSemitones = 0, speed = 1) {
+        if (!originalBuffer) return;
+        stop();
+        const playbackRate = speed * Math.pow(2, pitchSemitones / 12);
+        sourceNode = audioCtx.createBufferSource();
+        sourceNode.buffer = originalBuffer;
+        sourceNode.playbackRate.value = playbackRate;
+        sourceNode.connect(gainNode).connect(audioCtx.destination);
+        sourceNode.start();
     }
-}
+
+    // Render modified buffer into a new AudioBuffer via OfflineAudioContext and return WAV Blob
+    async function renderToWav(pitchSemitones = 0, speed = 1) {
+        if (!originalBuffer) throw new Error('No audio loaded');
+        const playbackRate = speed * Math.pow(2, pitchSemitones / 12);
+
+        const channels = originalBuffer.numberOfChannels;
+        const srcSampleRate = originalBuffer.sampleRate;
+        const newLength = Math.ceil(originalBuffer.length / playbackRate);
+
+        const offlineCtx = new OfflineAudioContext(channels, newLength, srcSampleRate);
+
+        const bufferSource = offlineCtx.createBufferSource();
+        bufferSource.buffer = originalBuffer;
+        bufferSource.playbackRate.value = playbackRate;
+        bufferSource.connect(offlineCtx.destination);
+        bufferSource.start(0);
+
+        const renderedBuffer = await offlineCtx.startRendering();
+        const wavBlob = audioBufferToWavBlob(renderedBuffer);
+        return wavBlob;
+    }
+
+    // 16-bit PCM WAV encoder
+    function audioBufferToWavBlob(buffer) {
+        const numChannels = buffer.numberOfChannels;
+        const sampleRate = buffer.sampleRate;
+        const length = buffer.length * numChannels * 2; // 16-bit
+        const header = 44;
+        const totalLength = header + length;
+        const bufferArr = new ArrayBuffer(totalLength);
+        const view = new DataView(bufferArr);
+
+        function writeString(view, offset, string) {
+            for (let i = 0; i < string.length; i++) {
+                view.setUint8(offset + i, string.charCodeAt(i));
+            }
+        }
+
+        writeString(view, 0, 'RIFF');
+        view.setUint32(4, 36 + length, true);
+        writeString(view, 8, 'WAVE');
+        writeString(view, 12, 'fmt ');
+        view.setUint32(16, 16, true); // PCM chunk size
+        view.setUint16(20, 1, true);  // PCM format
+        view.setUint16(22, numChannels, true);
+        view.setUint32(24, sampleRate, true);
+        view.setUint32(28, sampleRate * numChannels * 2, true);
+        view.setUint16(32, numChannels * 2, true);
+        view.setUint16(34, 16, true); // bits per sample
+        writeString(view, 36, 'data');
+        view.setUint32(40, length, true);
+
+        // write interleaved PCM16
+        let offset = 44;
+        const channelsData = [];
+        for (let ch = 0; ch < numChannels; ch++) {
+            channelsData.push(buffer.getChannelData(ch));
+        }
+
+        const interleaved = new Int16Array(buffer.length * numChannels);
+        let index = 0;
+        for (let i = 0; i < buffer.length; i++) {
+            for (let ch = 0; ch < numChannels; ch++) {
+                let sample = channelsData[ch][i];
+                sample = Math.max(-1, Math.min(1, sample));
+                interleaved[index++] = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
+            }
+        }
+
+        for (let i = 0; i < interleaved.length; i++, offset += 2) {
+            view.setInt16(offset, interleaved[i], true);
+        }
+
+        return new Blob([view], { type: 'audio/wav' });
+    }
+
+    return {
+        loadArrayBuffer,
+        isLoaded,
+        play,
+        stop,
+        renderToWav,
+        audioCtx
+    };
+})();
